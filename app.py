@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="MS Fotbal 2026 - vyhodnocení tipů",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="collapsed",
 )
 
@@ -448,10 +448,12 @@ st.markdown("""
 
 .table-wrapper {
     border-radius: 12px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     box-shadow: 0 4px 16px rgba(0,0,0,0.15);
     margin-bottom: 10px;
     border: 1px solid rgba(128, 128, 128, 0.15);
+    -webkit-overflow-scrolling: touch;
 }
 
 .results-table {
@@ -537,6 +539,68 @@ st.markdown("""
     vertical-align: middle;
     border: 1px solid rgba(128, 128, 128, 0.25);
 }
+
+            @media (max-width: 768px) {
+
+  .block-container {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    padding-top: 1rem;
+  }
+
+  h1 {
+    font-size: 1.7rem !important;
+    line-height: 1.2 !important;
+  }
+
+  h2,
+  h3 {
+    font-size: 1.25rem !important;
+  }
+
+  .match-card {
+    padding: 12px;
+    margin: 8px 0;
+  }
+
+  .match-card-title {
+    font-size: 1em;
+  }
+
+  .match-card-score {
+    font-size: 1.35em;
+  }
+
+  .results-table {
+    min-width: 760px;
+    font-size: 0.85em;
+  }
+
+  .results-table thead th {
+    padding: 9px 7px;
+  }
+
+  .results-table tbody td {
+    padding: 8px 7px;
+  }
+
+  .table-legend {
+    justify-content: flex-start;
+    gap: 10px;
+    font-size: 0.85em;
+  }
+
+  div[data-testid="column"] {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+
+  div[data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap;
+  }
+}            
+
+
 </style>
 """, unsafe_allow_html=True)
 
