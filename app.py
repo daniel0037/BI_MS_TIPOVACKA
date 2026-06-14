@@ -17,14 +17,14 @@ MATCH_COLUMNS = ["MEX-JAR", "CZE-KOR", "CZE-JAR", "MEX-KOR", "CZE-MEX", "JAR-KOR
 # Tipy jsou rovnou zapsané ve skriptu, není potřeba nahrávat XLSX.
 TIPS = [
     {"Jméno": "ADAMBOREC", "MEX-JAR": "2:0", "CZE-KOR": "1:1", "CZE-JAR": "2:0", "MEX-KOR": "1:1", "CZE-MEX": "1:3", "JAR-KOR": "2:1"},
-    {"Jméno": "PAVLINABOREC", "MEX-JAR": "3:0", "CZE-KOR": "1:1", "CZE-JAR": "1:0", "MEX-KOR": "2:0", "CZE-MEX": "0:3", "JAR-KOR": "1:2"},
+    {"Jméno": "PAVLÍNABOREC", "MEX-JAR": "3:0", "CZE-KOR": "1:1", "CZE-JAR": "1:0", "MEX-KOR": "2:0", "CZE-MEX": "0:3", "JAR-KOR": "1:2"},
     {"Jméno": "HELLOKITTY", "MEX-JAR": "2:2", "CZE-KOR": "3:0", "CZE-JAR": "1:0", "MEX-KOR": "2:1", "CZE-MEX": "1:1", "JAR-KOR": "1:3"},
-    {"Jméno": "JINDROS1981", "MEX-JAR": "2:1", "CZE-KOR": "3:2", "CZE-JAR": "1:0", "MEX-KOR": "4:1", "CZE-MEX": "1:2", "JAR-KOR": "2:2"},
+    {"Jméno": "JINDROS1881", "MEX-JAR": "2:1", "CZE-KOR": "3:2", "CZE-JAR": "1:0", "MEX-KOR": "4:1", "CZE-MEX": "1:2", "JAR-KOR": "2:2"},
     {"Jméno": "KUBAMAN", "MEX-JAR": "4:1", "CZE-KOR": "1:1", "CZE-JAR": "2:1", "MEX-KOR": "3:0", "CZE-MEX": "0:2", "JAR-KOR": "1:2"},
-    {"Jméno": "KRISTINABOREC", "MEX-JAR": "3:1", "CZE-KOR": "2:2", "CZE-JAR": "3:1", "MEX-KOR": "3:1", "CZE-MEX": "1:3", "JAR-KOR": "1:3"},
-    {"Jméno": "DANBOREC", "MEX-JAR": "2:0", "CZE-KOR": "1:2", "CZE-JAR": "1:1", "MEX-KOR": "1:1", "CZE-MEX": "2:2", "JAR-KOR": "0:2"},
+    {"Jméno": "KRISTÝNABOREC", "MEX-JAR": "3:1", "CZE-KOR": "2:2", "CZE-JAR": "3:1", "MEX-KOR": "3:1", "CZE-MEX": "1:3", "JAR-KOR": "1:3"},
+    {"Jméno": "DAN", "MEX-JAR": "2:0", "CZE-KOR": "1:2", "CZE-JAR": "1:1", "MEX-KOR": "1:1", "CZE-MEX": "2:2", "JAR-KOR": "0:2"},
     {"Jméno": "ALEX", "MEX-JAR": "3:1", "CZE-KOR": "2:2", "CZE-JAR": "2:1", "MEX-KOR": "2:0", "CZE-MEX": "1:3", "JAR-KOR": "2:1"},
-    {"Jméno": "NASTA", "MEX-JAR": "3:0", "CZE-KOR": "1:2", "CZE-JAR": "1:0", "MEX-KOR": "1:0", "CZE-MEX": "0:2", "JAR-KOR": "0:2"},
+    {"Jméno": "NASŤA", "MEX-JAR": "3:0", "CZE-KOR": "1:2", "CZE-JAR": "1:0", "MEX-KOR": "1:0", "CZE-MEX": "0:2", "JAR-KOR": "0:2"},
     {"Jméno": "🤖 CLAUDE AI", "MEX-JAR": "2:0", "CZE-KOR": "1:1", "CZE-JAR": "2:0", "MEX-KOR": "1:1", "CZE-MEX": "0:2", "JAR-KOR": "0:2"},
 ]
 
@@ -268,6 +268,8 @@ def fetch_head_to_head_history():
         return {}
 
 
+def evaluate(df, results):
+    """Evaluate all tips and calculate points for each person."""
     df = df.copy()
     point_cols = []
 
@@ -759,7 +761,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("⚽ MS Fotbal 2026 - Vyhodnocení Tipů")
+st.title("⚽ BI Champs - Tipovačka MS 2026")
 
 st.markdown(f"""
 <div class="match-card" style="border-left: 4px solid #2ca02c; text-align: center;">
@@ -791,7 +793,7 @@ match_emojis = {
 
 # Sekce pro zadávání výsledků
 if api_results:
-    st.subheader("✅ Výsledky zápasů (z API)")
+    st.subheader("✅ Výsledky zápasů")
     st.caption("Výsledky se automaticky stahují z football-data.org. Časy zápasů jsou ve středoevropském čase (SEČ/SELČ).")
     results = api_results
 
@@ -859,7 +861,7 @@ col1, col2, col3 = st.columns(3)
 
 if len(evaluated) > 0:
     with col1:
-        st.metric("🥇 Vítěz", evaluated.iloc[0]["Jméno"], f"{evaluated.iloc[0]['Celkem']} bodů")
+        st.metric("🥇 Lídr", evaluated.iloc[0]["Jméno"], f"{evaluated.iloc[0]['Celkem']} bodů")
     
     if len(evaluated) > 1:
         with col2:
@@ -888,11 +890,11 @@ sorted_by_cze_optimism = sorted(stats.items(), key=lambda x: x[1]["cze_balance"]
 
 # Vytvoř sloupce pro analýzy
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    ["⚽ Průměrný počet gólů", "🎯 Realističnost tipů", "🚀 Nejodvážnější tipy", "🇨🇿 Vztah k Česku", "🗺️ Konsenzus", "🤝 Head-to-Head", "🎲 Monte Carlo"]
+    ["⚽ Průměrný počet gólů", "🎯 Realističnost tipů", "🚀 Nejodvážnější tipy", "🇨🇿 Největší fanoušek ČR", "🗺️ Konsenzus", "🤝 Head-to-Head", "🎲 Monte Carlo"]
 )
 
 with tab1:
-    st.write("#### Kdo tipuje nejvíce gólů?")
+    st.write("#### Kdo tipuje největší golové hody?")
     analytics_html = '<div style="display: grid; gap: 10px;">'
     for i, (name, stat) in enumerate(sorted_by_goals, 1):
         medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else "•"
@@ -1158,19 +1160,20 @@ else:
 
 st.divider()
 
-
+# Download section
+download_col1, download_col2 = st.columns(2)
 
 with download_col1:
     st.download_button(
-        "📥 Stáhnout Excel",
+        "📥 Stáhnout XLSX",
         data=to_excel_bytes(evaluated),
-        file_name="evaluate_ms_fotbal_2026.xlsx",
+        file_name="vyhodnoceni_ms_fotbal_2026.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 with download_col2:
     st.download_button(
         "📥 Stáhnout CSV",
         data=evaluated.to_csv(index=False).encode("utf-8-sig"),
-        file_name="evaluate_ms_fotbal_2026.csv",
+        file_name="vyhodnoceni_ms_fotbal_2026.csv",
         mime="text/csv",
     )
