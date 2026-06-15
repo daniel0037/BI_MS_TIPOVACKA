@@ -4,11 +4,13 @@ import os
 import markdown
 import pandas as pd
 import requests
+import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(
-    page_title="MS Fotbal 2026 - vyhodnocení tipů",
+    page_title="BI Champs - Tipovačka MS ve fotbale 2026",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
@@ -30,6 +32,16 @@ TIPS = [
     {"Jméno": "ALEX", "MEX-JAR": "3:1", "CZE-KOR": "2:2", "CZE-JAR": "2:1", "MEX-KOR": "2:0", "CZE-MEX": "1:3", "JAR-KOR": "2:1"},
     {"Jméno": "NASŤA", "MEX-JAR": "3:0", "CZE-KOR": "1:2", "CZE-JAR": "1:0", "MEX-KOR": "1:0", "CZE-MEX": "0:2", "JAR-KOR": "0:2"},
 ]
+
+AI_TIP = {
+    "Jméno": "🤖 AI tip",
+    "MEX-JAR": "2:0",
+    "CZE-KOR": "1:2",
+    "CZE-JAR": "2:1",
+    "MEX-KOR": "2:1",
+    "CZE-MEX": "0:2",
+    "JAR-KOR": "0:2",
+}
 
 TEAM_NAMES = {
     "MEX": ["mexico", "mexiko", "mex"],
@@ -141,7 +153,21 @@ def format_kickoff(kickoff):
     return f"{local_dt.day}.{local_dt.month}. {local_dt.strftime('%H:%M')}"
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+def get_next_match(match_data):
+    """Vrátí (match_code, kickoff) nejbližšího budoucího zápasu, nebo None."""
+    now = datetime.now(PRAGUE_TZ)
+    upcoming = []
+    for match_code, info in match_data.items():
+        kickoff = info.get("kickoff")
+        status = info.get("status")
+        if kickoff and status not in ("FINISHED",) and kickoff.astimezone(PRAGUE_TZ) > now:
+            upcoming.append((match_code, kickoff))
+    if not upcoming:
+        return None
+    return min(upcoming, key=lambda x: x[1])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_world_cup_matches():
     token = get_football_data_token()
     if not token:
@@ -293,22 +319,13 @@ def analyze_tips(df_tips):
     return stats
 
 
-def generate_ai_insights(evaluated_df, stats_dict, played_matches):
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_ai_insights_cached(standings_text, stats_summary, played_matches, results_cache_key):
+    """Cached wrapper – regeneruje se jen pokud se změní výsledky (results_cache_key)."""
     api_key = get_groq_api_key()
 
     if not api_key:
-        st.error("❌ Groq API klíč není nastaven. Přidej GROQ_API_KEY do .streamlit/secrets.toml")
-        return None
-
-    standings_text = evaluated_df[["Pořadí", "Jméno", "Odehráno", "Celkem"]].to_string(index=False)
-
-    stats_summary = ""
-    for name, stat in list(stats_dict.items())[:9]:
-        stats_summary += (
-            f"- {name}: {stat['avg_goals']:.1f} gólů/zápas, "
-            f"realismus {stat['avg_realism']:.0f} %, "
-            f"odvaha {stat['audacity']}\n"
-        )
+        return None, "❌ Groq API klíč není nastaven. Přidej GROQ_API_KEY do .streamlit/secrets.toml"
 
     prompt = f"""
 Jsi expert na fotbalovou analytiku a zábavný data storytelling.
@@ -326,10 +343,10 @@ Statistiky tipů:
 Napiš česky krátký AI insight:
 - 1 krátký odstavec k aktuálním výsledkům a tabulce
 - 3 odrážky k top 3
-- Přidej nějaké zajímavosti o každém z dalších tipérů, ale buď přesný a drž se dat (nevycucávej z prstu)
+- Přidej nějaké zajímavosti o každém z dalších tipérů, ale buď přesný a drž se dat - výstup v lidské srozumitelné podobě, aby tomu rozuměl i ten, kdo není datový analytik (10 leté dítě)
 - tón: vtipný, sportovní, přátelský
 - používej emoji
-- drž se pouze poskytnutých dat a buď přesný
+- drž se pouze poskytnutých dat a buď přesný, výstup bude v lidské srozumitelné podobě, aby tomu rozuměl i ten, kdo není datový analytik
 - 1 vtip o datech nebo datové analytice na závěr
 """
 
@@ -353,11 +370,45 @@ Napiš česky krátký AI insight:
         response.raise_for_status()
 
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"], None
 
     except Exception as e:
-        st.error(f"❌ AI insight se nepodařilo vygenerovat: {e}")
+        return None, f"❌ AI insight se nepodařilo vygenerovat: {e}"
+
+
+def generate_ai_insights(evaluated_df, stats_dict, played_matches, results):
+    api_key = get_groq_api_key()
+
+    if not api_key:
+        st.error("❌ Groq API klíč není nastaven. Přidej GROQ_API_KEY do .streamlit/secrets.toml")
         return None
+
+    standings_text = evaluated_df[["Pořadí", "Jméno", "Odehráno", "Celkem"]].to_string(index=False)
+
+    stats_summary = ""
+    for name, stat in list(stats_dict.items())[:9]:
+        stats_summary += (
+            f"- {name}: {stat['avg_goals']:.1f} gólů/zápas, "
+            f"realismus {stat['avg_realism']:.0f} %, "
+            f"odvaha {stat['audacity']}\n"
+        )
+
+    # Cache key složen z výsledků – při novém výsledku se insight přegeneruje
+    results_cache_key = "|".join(
+        f"{m}={results.get(m, '')}" for m in MATCH_COLUMNS
+    )
+
+    ai_text, error = generate_ai_insights_cached(
+        standings_text, stats_summary, played_matches, results_cache_key
+    )
+
+    if error:
+        st.error(error)
+        return None
+
+    return ai_text
+
+
 
 
 def render_results_table(df, results):
@@ -400,6 +451,29 @@ def render_results_table(df, results):
 
         rows_html.append(f'<tr class="{row_class}">{cells}</tr>')
 
+    # AI tip – fixně na konci, nezapočítává se do pořadí
+    ai_points = sum(points_for_tip(AI_TIP[m], results.get(m, "")) for m in MATCH_COLUMNS)
+    ai_played = sum(1 for m in MATCH_COLUMNS if parse_score(results.get(m)) is not None)
+    ai_cells = '<td class="rank-cell">—</td>'
+    ai_cells += f'<td class="name-cell">{AI_TIP["Jméno"]}</td>'
+    for match in MATCH_COLUMNS:
+        tip_value = AI_TIP[match]
+        real_result = results.get(match, "")
+        if parse_score(real_result) is None:
+            css_class = "score-pending"
+        else:
+            pts = points_for_tip(tip_value, real_result)
+            if pts == POINTS_EXACT:
+                css_class = "score-exact"
+            elif pts == POINTS_OUTCOME:
+                css_class = "score-outcome"
+            else:
+                css_class = "score-miss"
+        ai_cells += f'<td class="score-cell {css_class}">{tip_value}</td>'
+    ai_cells += f'<td class="played-cell">{ai_played}/{len(MATCH_COLUMNS)}</td>'
+    ai_cells += f'<td class="total-cell">{ai_points}</td>'
+    rows_html.append(f'<tr class="ai-row">{ai_cells}</tr>')
+
     return f"""
     <div class="table-wrapper">
         <table class="results-table">
@@ -408,6 +482,94 @@ def render_results_table(df, results):
         </table>
     </div>
     """
+
+
+def render_charts(evaluated_df, stats_dict, results):
+    """Vykreslí grafy bodů, realismu a odvahy hráčů."""
+    played = get_played_matches_count(results)
+    if played == 0:
+        return
+
+    names = evaluated_df["Jméno"].tolist()
+    points = evaluated_df["Celkem"].tolist()
+    colors = []
+    for i, _ in enumerate(names):
+        if i == 0:
+            colors.append("#FFD700")
+        elif i == 1:
+            colors.append("#C0C0C0")
+        elif i == 2:
+            colors.append("#CD7F32")
+        else:
+            colors.append("#1f77b4")
+
+    # Graf 1 – Body hráčů.
+    fig_points = go.Figure(go.Bar(
+        x=names,
+        y=points,
+        marker_color=colors,
+        text=points,
+        textposition="outside",
+        cliponaxis=False,
+    ))
+    fig_points.update_layout(
+        title=dict(text="📊 Body hráčů", font=dict(size=16)),
+        yaxis=dict(title="Body", gridcolor="rgba(128,128,128,0.15)"),
+        xaxis=dict(tickangle=-30),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=50, b=60, l=40, r=20),
+        height=320,
+    )
+
+    # Graf 2 – Realismus vs Odvaha.
+    realism_vals = [stats_dict[n]["avg_realism"] for n in names if n in stats_dict]
+    audacity_vals = [stats_dict[n]["audacity"] for n in names if n in stats_dict]
+    chart_names = [n for n in names if n in stats_dict]
+
+    fig_scatter = go.Figure(go.Scatter(
+        x=realism_vals,
+        y=audacity_vals,
+        mode="markers+text",
+        text=chart_names,
+        textposition="top center",
+        marker=dict(
+            size=14,
+            color=points[:len(chart_names)],
+            colorscale="Blues",
+            showscale=True,
+            colorbar=dict(title="Body"),
+            line=dict(width=1, color="#1f77b4"),
+        ),
+    ))
+    fig_scatter.update_layout(
+        title=dict(text="🎯 Realismus vs Odvaha", font=dict(size=16)),
+        xaxis=dict(title="Realismus (%)", gridcolor="rgba(128,128,128,0.15)"),
+        yaxis=dict(title="Odvaha (součet odchylek)", gridcolor="rgba(128,128,128,0.15)"),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=50, b=60, l=60, r=20),
+        height=360,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(fig_points, use_container_width=True)
+        st.caption(
+            "Kolik bodů má každý tipér celkem. "
+            "Body získáváš za správně tipnutý výsledek nebo přesné skóre. "
+            "Čím vyšší sloupec, tím lépe tipuješ. 🥇🥈🥉 = top 3."
+        )
+    with col2:
+        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.caption(
+            "Každý bod = jeden tipér. "
+            "**Vodorovná osa (realismus):** jak moc se tvoje tipy shodují s očekávanými výsledky – "
+            "čím víc vpravo, tím konzervativněji tiluješ. "
+            "**Svislá osa (odvaha):** jak moc se tipy liší od očekávání – "
+            "čím výš, tím odvážněji a netradičněji tipuješ. "
+            "Barva bodu = počet bodů (tmavší = více bodů)."
+        )
 
 
 # ---------------- UI ----------------
@@ -499,6 +661,11 @@ st.markdown("""
 .results-table tbody tr.top1 { background-color: rgba(255, 215, 0, 0.18) !important; }
 .results-table tbody tr.top2 { background-color: rgba(192, 192, 192, 0.2) !important; }
 .results-table tbody tr.top3 { background-color: rgba(205, 127, 50, 0.18) !important; }
+.results-table tbody tr.ai-row { background-color: rgba(156, 39, 176, 0.06) !important; border-top: 2px dashed rgba(156, 39, 176, 0.35) !important; }
+.results-table tbody tr.ai-row td { opacity: 0.82; font-style: italic; }
+.results-table tbody tr.ai-row .name-cell { color: #9c27b0; font-style: normal; font-weight: 700; }
+.results-table tbody tr.ai-row .rank-cell { color: #9c27b0; font-weight: 700; }
+.results-table tbody tr.ai-row .total-cell { color: #9c27b0; }
 
 .score-exact {
     background-color: #f0faf0;
@@ -520,6 +687,38 @@ st.markdown("""
     opacity: 0.6;
 }
 
+.countdown-card {
+    background: var(--secondary-background-color);
+    border-radius: 8px;
+    padding: 14px 20px;
+    margin: 8px 0;
+    border: 1px solid rgba(128, 128, 128, 0.15);
+    border-left: 4px solid #e07b00;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    text-align: center;
+}
+
+.countdown-label {
+    margin: 0 0 6px 0;
+    font-size: 0.95em;
+    opacity: 0.75;
+}
+
+.countdown-timer {
+    font-size: 2em;
+    font-weight: 800;
+    color: #e07b00;
+    letter-spacing: 2px;
+    font-variant-numeric: tabular-nums;
+    margin: 0;
+}
+
+.countdown-match {
+    margin: 4px 0 0 0;
+    font-size: 1.05em;
+    font-weight: 600;
+}
+
 .table-legend {
     display: flex;
     flex-wrap: wrap;
@@ -538,6 +737,17 @@ st.markdown("""
     margin-right: 6px;
     vertical-align: middle;
     border: 1px solid rgba(128, 128, 128, 0.25);
+}
+
+.section-header {
+    margin: 2rem 0 1rem 0;
+    padding: 10px 16px;
+    background: linear-gradient(90deg, rgba(31,119,180,0.12), rgba(31,119,180,0.0));
+    border-left: 4px solid #1f77b4;
+    border-radius: 0 6px 6px 0;
+    font-size: 1.15em;
+    font-weight: 700;
+    letter-spacing: 0.01em;
 }
 
             @media (max-width: 768px) {
@@ -604,7 +814,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("⚽ BI Champs Tipovačka MS ve fotbale 2026")
+st.title("⚽ BI Champs - Tipovačka MS ve fotbale 2026")
 
 st.markdown(f"""
 <div class="match-card" style="border-left: 4px solid #2ca02c; text-align: center;">
@@ -633,66 +843,85 @@ match_emojis = {
     "JAR-KOR": "🇿🇦 vs 🇰🇷",
 }
 
+# Odpočítávání do nejbližšího zápasu – používá components.html() pro funkční JS.
+next_match = get_next_match(match_data)
+if next_match:
+    next_code, next_kickoff = next_match
+    next_local = next_kickoff.astimezone(PRAGUE_TZ)
+    next_label = match_emojis.get(next_code, next_code)
+    next_date_str = f"{next_local.day}.{next_local.month}. {next_local.strftime('%H:%M')}"
+    kickoff_ts = int(next_kickoff.timestamp())
+    components.html(f"""
+<style>
+  body {{ margin: 0; font-family: sans-serif; }}
+  .cd-card {{
+    background: linear-gradient(135deg, #fff8f0, #fff3e0);
+    border-radius: 10px;
+    padding: 14px 20px 12px;
+    border-left: 4px solid #e07b00;
+    box-shadow: 0 2px 8px rgba(224,123,0,0.12);
+    text-align: center;
+  }}
+  .cd-label {{ margin: 0 0 4px 0; font-size: 0.9em; color: #888; }}
+  .cd-timer {{
+    font-size: 2.2em;
+    font-weight: 900;
+    color: #e07b00;
+    letter-spacing: 3px;
+    font-variant-numeric: tabular-nums;
+    margin: 0;
+    font-family: monospace;
+  }}
+  .cd-match {{ margin: 6px 0 0 0; font-size: 1.05em; font-weight: 600; color: #333; }}
+</style>
+<div class="cd-card">
+  <p class="cd-label">⏱️ Další zápas za</p>
+  <p class="cd-timer" id="cd">--:--:--</p>
+  <p class="cd-match">{next_label} &nbsp;·&nbsp; {next_date_str}</p>
+</div>
+<script>
+  var target = {kickoff_ts} * 1000;
+  function update() {{
+    var diff = Math.max(0, target - Date.now());
+    var h = Math.floor(diff / 3600000);
+    var m = Math.floor((diff % 3600000) / 60000);
+    var s = Math.floor((diff % 60000) / 1000);
+    var el = document.getElementById('cd');
+    if (!el) return;
+    if (diff === 0) {{
+      el.textContent = '🔴 PRÁVĚ TEĎ';
+    }} else if (h >= 24) {{
+      var d = Math.floor(h / 24);
+      var rh = h % 24;
+      el.textContent = d + 'd ' + String(rh).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+    }} else {{
+      el.textContent = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+    }}
+  }}
+  update();
+  setInterval(update, 1000);
+</script>
+""", height=110)
+
 results = api_results.copy()
 
-# AI Insight nad sekcí Výsledky zápasů.
-preview_evaluated = evaluate(df, results)
-stats = analyze_tips(df)
-played_matches = get_played_matches_count(results)
-
-st.subheader("🤖 AI Insight")
-
-if played_matches == 0:
-    st.info("AI insight se zobrazí, jakmile bude odehraný alespoň jeden zápas nebo zadáš výsledek ručně.")
-else:
-    if st.button("✨ Vygeneruj AI Insight", key="ai_insight_btn"):
-        with st.spinner("Groq skládá komentář jak ze studia po zápase..."):
-            ai_text = generate_ai_insights(preview_evaluated, stats, played_matches)
-
-        if ai_text:
-            html = markdown.markdown(ai_text)
-            st.markdown(
-                f"""
-                <div class="match-card" style="border-left: 4px solid #9c27b0;">
-                    {html}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-st.divider()
-
-# Výsledky zápasů.
-if api_results:
-    st.subheader("✅ Výsledky zápasů")
-    st.caption("Výsledky se automaticky stahují z football-data.org. Časy zápasů jsou ve středoevropském čase.")
-else:
-    st.subheader("🎯 Výsledky zápasů")
+# Výsledky zápasů – sekce pro ruční zadání (musí proběhnout PŘED tabulkou,
+# aby results obsahovalo i manuálně zadané skóre).
+if not api_results:
+    st.markdown('<div class="section-header">🎯 Výsledky zápasů</div>', unsafe_allow_html=True)
     st.caption("Vyplň výsledky ručně. Nezaplněné zápasy se nebudou vyhodnocovat.")
 
-cols = st.columns(3)
-
-for i, match in enumerate(MATCH_COLUMNS):
-    with cols[i % 3]:
-        kickoff_str = format_kickoff(match_data.get(match, {}).get("kickoff"))
-        kickoff_html = f'<p class="match-card-kickoff">🕒 {kickoff_str}</p>' if kickoff_str else ""
-
-        if api_results:
-            st.markdown(f"""
-            <div class="match-card">
-                <p class="match-card-title">{match_emojis.get(match, match)}</p>
-                <p class="match-card-score">{results.get(match, "?:?")}</p>
-                {kickoff_html}
-            </div>
-            """, unsafe_allow_html=True)
-        else:
+    cols_input = st.columns(3)
+    for i, match in enumerate(MATCH_COLUMNS):
+        with cols_input[i % 3]:
+            kickoff_str = format_kickoff(match_data.get(match, {}).get("kickoff"))
+            kickoff_html = f'<p class="match-card-kickoff">🕒 {kickoff_str}</p>' if kickoff_str else ""
             st.markdown(f"""
             <div class="match-card">
                 <p class="match-card-title">{match_emojis.get(match, match)}</p>
                 {kickoff_html}
             </div>
             """, unsafe_allow_html=True)
-
             results[match] = st.text_input(
                 f"Skóre {match}",
                 value="",
@@ -700,12 +929,31 @@ for i, match in enumerate(MATCH_COLUMNS):
                 label_visibility="collapsed",
             )
 
-# Po ručním zadání přepočítáme data.
-evaluated = evaluate(df, results)
+# Výsledky zápasů – karty (zobrazí se jen když jsou API výsledky).
+if api_results:
+    st.markdown('<div class="section-header">✅ Výsledky zápasů</div>', unsafe_allow_html=True)
+    st.caption("Výsledky se automaticky stahují z football-data.org. Časy zápasů jsou ve středoevropském čase.")
+
+    cols = st.columns(3)
+    for i, match in enumerate(MATCH_COLUMNS):
+        with cols[i % 3]:
+            kickoff_str = format_kickoff(match_data.get(match, {}).get("kickoff"))
+            kickoff_html = f'<p class="match-card-kickoff">🕒 {kickoff_str}</p>' if kickoff_str else ""
+            st.markdown(f"""
+            <div class="match-card">
+                <p class="match-card-title">{match_emojis.get(match, match)}</p>
+                <p class="match-card-score">{results.get(match, "?:?")}</p>
+                {kickoff_html}
+            </div>
+            """, unsafe_allow_html=True)
+
+# Tabulka Pořadí.
+preview_evaluated = evaluate(df, results)
+stats = analyze_tips(df)
 played_matches = get_played_matches_count(results)
 
-st.subheader("🏆 Pořadí")
-st.markdown(render_results_table(evaluated, results), unsafe_allow_html=True)
+st.markdown('<div class="section-header">🏆 Pořadí</div>', unsafe_allow_html=True)
+st.markdown(render_results_table(preview_evaluated, results), unsafe_allow_html=True)
 
 st.markdown("""
 <div class="table-legend">
@@ -716,79 +964,45 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.divider()
+
+# Grafy statistik.
+st.markdown('<div class="section-header">📈 Statistiky</div>', unsafe_allow_html=True)
+render_charts(preview_evaluated, stats, results)
 
 
-st.subheader("📖 Vysvětlivky metrik")
+# AI Insight – za tabulkou Pořadí, generuje se automaticky dle výsledků.
+st.markdown('<div class="section-header">🤖 AI Insight</div>', unsafe_allow_html=True)
 
-st.markdown(f"""
-### Bodování tipů
+if played_matches == 0:
+    st.info("AI insight se zobrazí automaticky, jakmile bude odehraný alespoň jeden zápas.")
+else:
+    with st.spinner("🧠 Groq analyzuje výsledky..."):
+        ai_text = generate_ai_insights(preview_evaluated, stats, played_matches, results)
 
-- **Přesný výsledek** = {POINTS_EXACT} body
-Tip přesně odpovídá skutečnému skóre zápasu.
+    if ai_text:
+        html = markdown.markdown(ai_text)
+        st.markdown(
+            f"""
+            <div class="match-card" style="border-left: 4px solid #9c27b0;">
+                {html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-- **Správný výsledek zápasu** = {POINTS_OUTCOME} bod
-Tip netrefil přesné skóre, ale správně určil výhru, remízu nebo prohru.
 
-- **Netrefený tip** = {POINTS_OTHER} bodů
-Tip neodpovídá ani výsledku zápasu.
+with st.expander("📖 Jak to funguje? (vysvětlivky)"):
+    st.markdown(f"""
+**🎯 Bodování**
+— Přesné skóre = **{POINTS_EXACT} body** &nbsp;|&nbsp; Správný výsledek (výhra/remíza/prohra) = **{POINTS_OUTCOME} bod** &nbsp;|&nbsp; Špatný tip = **{POINTS_OTHER} bodů**
 
----
+**📐 Realismus** — Jak moc se tvoje tipy blíží tomu, co bylo před turnajem očekáváno od jednotlivých týmů. 100 % = tipuješ přesně podle očekávání, nízké % = tipuješ netradiční výsledky.
 
-### Realismus
+**💥 Odvaha** — Jak moc se tipy liší od očekávání. Čím vyšší číslo, tím odvážnější a netradičnější tipy. Nízká odvaha = konzervativní tipér.
 
-Realismus ukazuje, jak moc se tipy hráče blíží očekávaným výsledkům podle předem nastavené síly týmů.
+**⚽ Průměr gólů** — Kolik gólů průměrně čekáš v jednom zápase. Vyšší číslo = tiluješ otevřené, gólovější zápasy.
 
-Výpočet pro každý zápas:
+**🇨🇿 Bilance ČR** — Tipované góly ČR minus góly soupeřů. Kladné číslo = věříš českému týmu, záporné = jsi skeptik.
 
-- **100 %** = tip přesně odpovídá očekávanému výsledku
-- **70 %** = tip má stejný výsledek zápasu, tedy výhra/remíza/prohra
-- **40 %** = tip se liší pouze o jeden gól celkem
-- **0–50 %** = čím větší rozdíl oproti očekávání, tím nižší realismus
-
-Celkový realismus hráče je průměr ze všech jeho tipů.
-
----
-
-### Odvaha
-
-Odvaha měří, jak moc se hráč ve svých tipech odchyluje od očekávaných výsledků.
-
-Pro každý zápas se počítá rozdíl:
-
-`|tip domácí - očekávání domácí| + |tip hosté - očekávání hosté|`
-
-Tyto rozdíly se následně sečtou za všechny zápasy.
-
-Čím vyšší hodnota, tím odvážnější a méně konzervativní tipování.
-
----
-
-### Průměr gólů na zápas
-
-Ukazuje, kolik gólů hráč průměrně očekává v jednom zápase podle svých tipů.
-
-Vyšší hodnota znamená, že hráč tipuje otevřenější a gólovější zápasy.
-
----
-
-### Bilance ČR
-
-Bilance ČR ukazuje, jak optimisticky hráč tipuje český tým.
-
-Počítá se jako:
-
-`tipované góly ČR - tipované góly soupeřů ČR`
-
-Vyšší hodnota znamená větší víru v český tým.
-Nižší nebo záporná hodnota znamená opatrnější až skeptičtější pohled na české výsledky.
-
----
-
-### AI Insight
-
-AI Insight používá aktuální pořadí, počet odehraných zápasů a doplňkové metriky jako realismus, odvahu, průměr gólů nebo bilanci ČR.
-
-Slouží pouze jako komentář a zábavná analytická nadstavba.
-Body a pořadí se počítají výhradně podle skutečných výsledků zápasů.
+**🤖 AI Insight** — Automatický komentář od AI na základě aktuálního pořadí a statistik. Jen pro zábavu, na body nemá vliv.
 """)
