@@ -21,6 +21,11 @@ POINTS_OTHER = 0
 
 MATCH_COLUMNS = ["MEX-JAR", "CZE-KOR", "CZE-JAR", "MEX-KOR", "CZE-MEX", "JAR-KOR"]
 
+# Maximální uvažovaná odchylka (součet |Δhome|+|Δaway|) gólů od AI tipu,
+# na kterou se normalizuje realismus/odvaha na škálu 0-100 %.
+# Při této a vyšší odchylce je realismus 0 % a odvaha 100 %.
+MAX_GOAL_DIFF = 6
+
 TIPS = [
     {"Jméno": "ADAMBOREC", "MEX-JAR": "2:0", "CZE-KOR": "1:1", "CZE-JAR": "2:0", "MEX-KOR": "1:1", "CZE-MEX": "1:3", "JAR-KOR": "2:1"},
     {"Jméno": "PAVLÍNABOREC", "MEX-JAR": "3:0", "CZE-KOR": "1:1", "CZE-JAR": "1:0", "MEX-KOR": "2:0", "CZE-MEX": "0:3", "JAR-KOR": "1:2"},
@@ -48,13 +53,6 @@ TEAM_NAMES = {
     "JAR": ["south africa", "jihoafrická republika", "jihoafricka republika", "jar", "rsa"],
     "CZE": ["czech republic", "czechia", "česko", "cesko", "cze"],
     "KOR": ["south korea", "korea republic", "korea republic of", "jižní korea", "jizni korea", "kor"],
-}
-
-EXPECTED_RESULTS = {
-    "MEX": {"JAR": "2:0", "KOR": "1:1", "CZE": "2:0"},
-    "CZE": {"JAR": "2:0", "KOR": "1:1", "MEX": "0:2"},
-    "KOR": {"MEX": "1:1", "CZE": "1:1", "JAR": "2:0"},
-    "JAR": {"MEX": "0:2", "CZE": "0:2", "KOR": "0:2"},
 }
 
 FOOTBALL_DATA_API_URL = "https://api.football-data.org/v4/competitions/WC/matches"
@@ -245,33 +243,41 @@ def evaluate(df, results):
 
 
 def get_expected_result(match_code):
-    home_code, away_code = match_code.split("-")
-    return EXPECTED_RESULTS.get(home_code, {}).get(away_code, "?:?")
+    return AI_TIP.get(match_code, "?:?")
 
 
 def realism_score(tip, expected):
+    """Realismus tipu vůči AI odhadu (0-100 %).
+
+    Postaveno na jediné vzdálenostní metrice (součet absolutních rozdílů
+    gólů domácích a hostů od AI tipu), normalizované na maximální
+    uvažovanou odchylku MAX_GOAL_DIFF. Skóre klesá monotónně s rostoucí
+    vzdáleností - žádné skoky ani nekonzistentní prahy.
+    """
     tip_score = parse_score(tip)
     exp_score = parse_score(expected)
 
     if tip_score is None or exp_score is None:
-        return 50
+        return None
 
-    if tip_score == exp_score:
-        return 100
-
-    if outcome(tip_score) == outcome(exp_score):
-        return 70
-
-    home_diff = abs(tip_score[0] - exp_score[0])
-    away_diff = abs(tip_score[1] - exp_score[1])
-
-    if home_diff + away_diff == 1:
-        return 40
-
-    return max(0, 50 - (home_diff + away_diff) * 10)
+    distance = abs(tip_score[0] - exp_score[0]) + abs(tip_score[1] - exp_score[1])
+    return max(0, 100 - (distance / MAX_GOAL_DIFF) * 100)
 
 
-def analyze_tips(df_tips):
+def audacity_score(tip, expected):
+    """Odvaha tipu (0-100 %) - přesný doplněk realismu (100 - realismus).
+
+    Díky společnému základu (stejná vzdálenostní metrika) jsou realismus
+    a odvaha matematicky komplementární: realismus + odvaha = 100 %.
+    """
+    realism = realism_score(tip, expected)
+    if realism is None:
+        return None
+    return 100 - realism
+
+
+def analyze_tips(df_tips, results=None):
+    results = results or {}
     stats = {}
 
     for _, row in df_tips.iterrows():
@@ -280,14 +286,17 @@ def analyze_tips(df_tips):
         total_goals = 0
         cze_goals = 0
         cze_goals_against = 0
-        realism = []
-        audacity_score = 0
+        realism_values = []
+        audacity_values = []
+        tipped_matches = 0
+        played_tip_points = []  # (match, points, tip) jen pro odehrané zápasy
 
         for match in MATCH_COLUMNS:
             tip_score = parse_score(row[match])
             if tip_score is None:
                 continue
 
+            tipped_matches += 1
             total_goals += tip_score[0] + tip_score[1]
 
             if "CZE" in match:
@@ -301,26 +310,104 @@ def analyze_tips(df_tips):
                     cze_goals_against += tip_score[0]
 
             expected = get_expected_result(match)
-            exp_score = parse_score(expected)
 
-            realism.append(realism_score(row[match], expected))
+            realism = realism_score(row[match], expected)
+            if realism is not None:
+                realism_values.append(realism)
+                audacity_values.append(100 - realism)
 
-            if exp_score:
-                audacity_score += abs(tip_score[0] - exp_score[0]) + abs(tip_score[1] - exp_score[1])
+            real_result = results.get(match)
+            if parse_score(real_result) is not None:
+                pts = points_for_tip(row[match], real_result)
+                played_tip_points.append((match, pts, row[match]))
+
+        best_match = max(played_tip_points, key=lambda t: t[1]) if played_tip_points else None
+        worst_match = min(played_tip_points, key=lambda t: t[1]) if played_tip_points else None
 
         stats[name] = {
             "total_goals": total_goals,
             "avg_goals": total_goals / len(MATCH_COLUMNS),
             "cze_balance": cze_goals - cze_goals_against,
-            "avg_realism": sum(realism) / len(realism) if realism else 0,
-            "audacity": audacity_score,
+            # Průměr přes skutečně tipnuté zápasy (ne přes všechny MATCH_COLUMNS),
+            # aby hráč s méně tipy nebyl zkreslen chybějícími hodnotami.
+            "avg_realism": sum(realism_values) / len(realism_values) if realism_values else 0,
+            "avg_audacity": sum(audacity_values) / len(audacity_values) if audacity_values else 0,
+            # Nejlepší/nejhorší tip jen mezi odehranými zápasy (kde je znám výsledek).
+            "best_match": best_match,
+            "worst_match": worst_match,
         }
 
     return stats
 
 
+def analyze_match_consensus(df_tips, results):
+    """Pro každý odehraný zápas spočítá shodu/rozptyl tipů skupiny.
+
+    Vrací pro každý zápas: nejčastěji tipovaný výsledek (a kolik hráčů na
+    něm souhlasilo), počet různých tipovaných výsledků (rozptyl) a kolik
+    hráčů reálně trefilo přesné skóre / správný výsledek (výhra/remíza/
+    prohra) - to je nutné počítat explicitně přes points_for_tip, ne
+    odvozovat z "nejčastějšího tipu skupiny", protože nejčastější tip
+    nemusí být ten správný, i když ho někteří hráči trefili.
+    """
+    from collections import Counter
+
+    consensus = {}
+
+    for match in MATCH_COLUMNS:
+        real_result = results.get(match)
+        if parse_score(real_result) is None:
+            continue
+
+        tip_values = [t for t in df_tips[match].tolist() if parse_score(t) is not None]
+        if not tip_values:
+            continue
+
+        counts = Counter(tip_values)
+        most_common_tip, most_common_count = counts.most_common(1)[0]
+
+        exact_hits = sum(1 for t in tip_values if points_for_tip(t, real_result) == POINTS_EXACT)
+        outcome_only_hits = sum(1 for t in tip_values if points_for_tip(t, real_result) == POINTS_OUTCOME)
+        # Celkem kolik hráčů uhádlo aspoň správný výsledek (výhra/remíza/prohra) -
+        # zahrnuje i ty, kdo trefili rovnou přesné skóre (přesné skóre je
+        # podmnožina "správného výsledku"). Bez tohoto součtu si lze mylně
+        # myslet, že "outcome_hits=0" znamená "nikdo neuhádl výsledek",
+        # i když ve skutečnosti pár hráčů uhádlo výsledek ROVNOU přesně.
+        outcome_total_hits = exact_hits + outcome_only_hits
+
+        consensus[match] = {
+            "real_result": real_result,
+            "most_common_tip": most_common_tip,
+            "most_common_count": most_common_count,
+            "total_tips": len(tip_values),
+            "unique_tips": len(counts),
+            # exact_hits: trefili přesné skóre.
+            # outcome_only_hits: trefili JEN výsledek (ne přesné skóre) - menšina.
+            # outcome_total_hits: trefili aspoň výsledek celkem (= exact_hits + outcome_only_hits).
+            "exact_hits": exact_hits,
+            "outcome_only_hits": outcome_only_hits,
+            "outcome_total_hits": outcome_total_hits,
+        }
+
+    return consensus
+
+
+def get_ai_ranking(evaluated_df, results):
+    """Spočítá, kolik bodů by AI tip získal, a na jaké by se umístil pozici
+    mezi reálnými hráči (1 = nejlepší)."""
+    ai_points = sum(points_for_tip(AI_TIP[m], results.get(m, "")) for m in MATCH_COLUMNS)
+    better_players = (evaluated_df["Celkem"] > ai_points).sum()
+    ai_rank = int(better_players) + 1
+
+    return {
+        "points": ai_points,
+        "rank": ai_rank,
+        "total_players": len(evaluated_df) + 1,
+    }
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def generate_ai_insights_cached(standings_text, stats_summary, played_matches, results_cache_key):
+def generate_ai_insights_cached(standings_text, stats_summary, consensus_summary, ai_rank_summary, played_matches, results_cache_key):
     """Cached wrapper – regeneruje se jen pokud se změní výsledky (results_cache_key)."""
     api_key = get_groq_api_key()
 
@@ -330,24 +417,54 @@ def generate_ai_insights_cached(standings_text, stats_summary, played_matches, r
     prompt = f"""
 Jsi expert na fotbalovou analytiku a zábavný data storytelling.
 
-Analyzuj firemní tipovací soutěž k MS ve fotbale 2026.
+Analyzuj firemní tipovací soutěž k MS ve fotbale 2026. Tipéři před turnajem
+odhadovali skóre jednotlivých zápasů. Jako referenční "odborný" odhad slouží
+🤖 AI tip (vygenerovaný předem AI modelem) - vůči němu se počítá realismus.
 
-Aktuální tabulka:
+Aktuální tabulka (pořadí podle bodů za uhodnuté výsledky/skóre):
 {standings_text}
 
 Počet odehraných zápasů: {played_matches}/{len(MATCH_COLUMNS)}
 
-Statistiky tipů:
+Statistiky a nejlepší/nejhorší tip každého hráče (za odehrané zápasy):
 {stats_summary}
 
-Napiš česky krátký AI insight:
-- 1 krátký odstavec k aktuálním výsledkům a tabulce
-- 3 odrážky k top 3
-- Přidej nějaké zajímavosti o každém z dalších tipérů, ale buď přesný a drž se dat - výstup v lidské srozumitelné podobě, aby tomu rozuměl i ten, kdo není datový analytik (10 leté dítě)
+Shoda/rozptyl mezi tipéry u jednotlivých odehraných zápasů:
+{consensus_summary}
+
+Jak by si vedl samotný AI tip:
+{ai_rank_summary}
+
+Vysvětlení metrik, abys jim správně rozuměl:
+- "realismus %" = jak blízko byly tipy hráče k 🤖 AI tipu (100 % = identické s AI, 0 % = max. odchylka)
+- "bilance ČR" = tipované góly ČR minus góly soupeřů v zápasech České republiky (kladné = věří ČR, záporné = skeptik)
+- "nejlepší/nejhorší tip" = zápas, kde hráč získal nejvíc/nejméně bodů (podle skutečného výsledku)
+- DŮLEŽITÉ - u každého zápasu jsou tři čísla o tom, kdo "uhodl":
+  1) "CELKEM trefilo aspoň správný výsledek" = kolik hráčů celkem uhádlo výhru/remízu/prohru správně (toto je hlavní číslo pro "kolik lidí to uhodlo")
+  2) "z toho přesné skóre" = z těch hráčů z bodu 1, kolik trefilo i přesné skóre (jsou součástí čísla z bodu 1, ne navíc)
+  3) "JEN výsledek bez přesného skóre" = ti, kdo uhodli výhru/remízu/prohru, ale ne přesné skóre
+  Pokud je "CELKEM trefilo aspoň správný výsledek" 0, znamená to, že NIKDO neuhodl ani výsledek. Pokud je tam třeba 2, znamená to, že 2 lidé uhodli výsledek (ať už přesně nebo jen typ výsledku) - NIKDY netvrď, že "nikdo neuhodl", pokud je toto číslo větší než 0.
+- "nejčastější tip skupiny" popisuje jen to, na čem se nejvíc lidí shodlo (může, ale nemusí být správně) - slouží pro pozorování o shodě/rozptylu názorů, NE pro určení, kdo uhodl - k tomu používej výhradně čísla z předchozího bodu
+
+Napiš česky krátký, výstižný AI insight, který popíše, JAK SI TIPÉŘI ZATÍM VEDOU
+a CO JE NA KAŽDÉM Z NICH ZAJÍMAVÉ/ODLIŠNÉ - ne jen suchý výčet čísel, ale srozumitelný
+příběh nad daty. Hledej konkrétní, překvapivá pozorování - typicky:
+- kdo měl největší štěstí/neštěstí (např. vysoké skóre i přes nízký realismus, nebo naopak)
+- u zápasů: kolik lidí celkem uhodlo (podle "CELKEM trefilo aspoň správný výsledek", NE podle nejčastějšího tipu) a kde se skupina nejvíc shodla nebo nejvíc rozdělila
+- jak by si vedla AI vůči lidem - je nad nimi, nebo ji lidé porážejí?
+- kdo se nejvíc/nejméně trefil do svého nejlepšího zápasu
+
+Struktura:
+- 1 krátký odstavec o aktuální tabulce - kdo vede, jak je to vyrovnané/nevyrovnané
+- 3 odrážky k top 3 hráčům - co konkrétně dělají dobře a proč jsou nahoře (klidně zmiň jejich nejlepší tip)
+- 1 odstavec/odrážka o tom, jak si vede AI tip vůči lidem (z dat o pořadí AI)
+- 1 odstavec/odrážka o zápase(ech), kde se skupina nejvíc shodla nebo nejvíc rozdělila a jak to vyšlo
+- ke každému dalšímu tipérovi 1 krátká věta s konkrétní zajímavostí podloženou číslem ze statistik (žádné obecné fráze)
+- výstup musí být přesný a držet se POUZE poskytnutých dat (žádné vymyšlené detaily o zápasech ani hráčích)
+- napiš to tak, aby tomu rozumělo i 10leté dítě - krátké věty, žádný analytický žargon
 - tón: vtipný, sportovní, přátelský
 - používej emoji
-- drž se pouze poskytnutých dat a buď přesný, výstup bude v lidské srozumitelné podobě, aby tomu rozuměl i ten, kdo není datový analytik
-- 1 vtip o datech nebo datové analytice na závěr
+- na závěr 1 vtip o datech nebo datové analytice
 """
 
     payload = {
@@ -387,11 +504,38 @@ def generate_ai_insights(evaluated_df, stats_dict, played_matches, results):
 
     stats_summary = ""
     for name, stat in list(stats_dict.items())[:9]:
+        best = stat.get("best_match")
+        worst = stat.get("worst_match")
+        best_str = f"nejlepší tip {best[0]} ({best[2]}, {best[1]} b.)" if best else "bez odehraných zápasů"
+        worst_str = f"nejhorší tip {worst[0]} ({worst[2]}, {worst[1]} b.)" if worst else ""
+
         stats_summary += (
             f"- {name}: {stat['avg_goals']:.1f} gólů/zápas, "
             f"realismus {stat['avg_realism']:.0f} %, "
-            f"odvaha {stat['audacity']}\n"
+            f"bilance ČR {stat['cze_balance']:+d}, "
+            f"{best_str}"
+            + (f", {worst_str}" if worst_str and worst != best else "")
+            + "\n"
         )
+
+    consensus = analyze_match_consensus(df, results)
+    consensus_summary = ""
+    for match, c in consensus.items():
+        shoda_pct = round(100 * c["most_common_count"] / c["total_tips"])
+        consensus_summary += (
+            f"- {match}: skutečný výsledek {c['real_result']} | "
+            f"CELKEM trefilo aspoň správný výsledek (výhra/remíza/prohra): {c['outcome_total_hits']}/{c['total_tips']} hráčů, "
+            f"z toho přesné skóre trefilo {c['exact_hits']}/{c['total_tips']} hráčů "
+            f"a JEN výsledek bez přesného skóre trefilo {c['outcome_only_hits']}/{c['total_tips']} hráčů | "
+            f"nejčastější tip skupiny byl {c['most_common_tip']} ({c['most_common_count']}/{c['total_tips']} hráčů, {shoda_pct} %), "
+            f"celkem {c['unique_tips']} různých tipů\n"
+        )
+
+    ai_rank = get_ai_ranking(evaluated_df, results)
+    ai_rank_summary = (
+        f"🤖 AI tip má zatím {ai_rank['points']} bodů, což by stačilo na "
+        f"{ai_rank['rank']}. místo z {ai_rank['total_players']} (včetně AI)."
+    )
 
     # Cache key složen z výsledků – při novém výsledku se insight přegeneruje
     results_cache_key = "|".join(
@@ -399,7 +543,8 @@ def generate_ai_insights(evaluated_df, stats_dict, played_matches, results):
     )
 
     ai_text, error = generate_ai_insights_cached(
-        standings_text, stats_summary, played_matches, results_cache_key
+        standings_text, stats_summary, consensus_summary, ai_rank_summary,
+        played_matches, results_cache_key,
     )
 
     if error:
@@ -522,14 +667,18 @@ def render_charts(evaluated_df, stats_dict, results):
         height=320,
     )
 
-    # Graf 2 – Realismus vs Odvaha.
+    # Graf 2 – Realismus vs Průměr gólů.
+    # Pozn.: odvaha = 100 % - realismus (přesný doplněk), proto by graf
+    # realismus x odvaha vždy degeneroval na jednu přímku a nenesl by
+    # žádnou novou informaci. Místo toho dvě nezávislé osy: realismus
+    # (jak blízko AI tipu) a průměr gólů (defenzivní vs. útočný styl tipování).
     realism_vals = [stats_dict[n]["avg_realism"] for n in names if n in stats_dict]
-    audacity_vals = [stats_dict[n]["audacity"] for n in names if n in stats_dict]
+    avg_goals_vals = [stats_dict[n]["avg_goals"] for n in names if n in stats_dict]
     chart_names = [n for n in names if n in stats_dict]
 
     fig_scatter = go.Figure(go.Scatter(
         x=realism_vals,
-        y=audacity_vals,
+        y=avg_goals_vals,
         mode="markers+text",
         text=chart_names,
         textposition="top center",
@@ -541,11 +690,35 @@ def render_charts(evaluated_df, stats_dict, results):
             colorbar=dict(title="Body"),
             line=dict(width=1, color="#1f77b4"),
         ),
+        name="Tipéři",
+        showlegend=False,
     ))
+
+    # AI tip jako referenční bod – realismus je z definice 100 %
+    # (AI tip = vlastní reference, od které se realismus počítá).
+    ai_goals = [parse_score(AI_TIP[m]) for m in MATCH_COLUMNS]
+    ai_avg_goals = sum(h + a for h, a in ai_goals) / len(MATCH_COLUMNS)
+
+    fig_scatter.add_trace(go.Scatter(
+        x=[100],
+        y=[ai_avg_goals],
+        mode="markers+text",
+        text=["🤖 AI tip"],
+        textposition="top center",
+        marker=dict(
+            size=18,
+            color="#9c27b0",
+            symbol="star",
+            line=dict(width=1.5, color="#6a1b7a"),
+        ),
+        name="AI tip",
+        showlegend=False,
+    ))
+
     fig_scatter.update_layout(
-        title=dict(text="🎯 Realismus vs Odvaha", font=dict(size=16)),
-        xaxis=dict(title="Realismus (%)", gridcolor="rgba(128,128,128,0.15)"),
-        yaxis=dict(title="Odvaha (součet odchylek)", gridcolor="rgba(128,128,128,0.15)"),
+        title=dict(text="🎯 Realismus vs Průměr gólů", font=dict(size=16)),
+        xaxis=dict(title="Realismus (%)", gridcolor="rgba(128,128,128,0.15)", range=[-5, 105]),
+        yaxis=dict(title="Průměr gólů / zápas", gridcolor="rgba(128,128,128,0.15)"),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(t=50, b=60, l=60, r=20),
@@ -564,11 +737,12 @@ def render_charts(evaluated_df, stats_dict, results):
         st.plotly_chart(fig_scatter, use_container_width=True)
         st.caption(
             "Každý bod = jeden tipér. "
-            "**Vodorovná osa (realismus):** jak moc se tvoje tipy shodují s očekávanými výsledky – "
-            "čím víc vpravo, tím konzervativněji tiluješ. "
-            "**Svislá osa (odvaha):** jak moc se tipy liší od očekávání – "
-            "čím výš, tím odvážněji a netradičněji tipuješ. "
-            "Barva bodu = počet bodů (tmavší = více bodů)."
+            "**Vodorovná osa (realismus):** jak moc se tvoje tipy shodují s 🤖 AI tipem – "
+            "čím víc vpravo, tím konzervativněji tipuješ (vlevo = odvážněji, netradičně). "
+            "**Svislá osa (průměr gólů):** kolik gólů průměrně čekáš v zápase – "
+            "čím výš, tím otevřenější, gólovější zápasy tipuješ. "
+            "Barva bodu = počet bodů (tmavší = více bodů). "
+            "Fialová hvězda = 🤖 AI tip (referenční bod, realismus 100 %)."
         )
 
 
@@ -949,7 +1123,7 @@ if api_results:
 
 # Tabulka Pořadí.
 preview_evaluated = evaluate(df, results)
-stats = analyze_tips(df)
+stats = analyze_tips(df, results)
 played_matches = get_played_matches_count(results)
 
 st.markdown('<div class="section-header">🏆 Pořadí</div>', unsafe_allow_html=True)
@@ -996,9 +1170,9 @@ with st.expander("📖 Jak to funguje? (vysvětlivky)"):
 **🎯 Bodování**
 — Přesné skóre = **{POINTS_EXACT} body** &nbsp;|&nbsp; Správný výsledek (výhra/remíza/prohra) = **{POINTS_OUTCOME} bod** &nbsp;|&nbsp; Špatný tip = **{POINTS_OTHER} bodů**
 
-**📐 Realismus** — Jak moc se tvoje tipy blíží tomu, co bylo před turnajem očekáváno od jednotlivých týmů. 100 % = tipuješ přesně podle očekávání, nízké % = tipuješ netradiční výsledky.
+**📐 Realismus** — Jak moc se tvoje tipy blíží 🤖 AI tipu (odbornému odhadu výsledků). 100 % = tipuješ přesně podle AI, nízké % = tipuješ netradiční výsledky.
 
-**💥 Odvaha** — Jak moc se tipy liší od očekávání. Čím vyšší číslo, tím odvážnější a netradičnější tipy. Nízká odvaha = konzervativní tipér.
+**💥 Odvaha** — Doplněk realismu (100 % − realismus). Jak moc se tipy liší od AI tipu. Čím vyšší číslo, tím odvážnější a netradičnější tipy. Nízká odvaha = konzervativní tipér.
 
 **⚽ Průměr gólů** — Kolik gólů průměrně čekáš v jednom zápase. Vyšší číslo = tiluješ otevřené, gólovější zápasy.
 
