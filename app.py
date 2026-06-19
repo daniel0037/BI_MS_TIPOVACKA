@@ -36,6 +36,7 @@ TIPS = [
     {"Jméno": "DAN", "MEX-JAR": "2:0", "CZE-KOR": "1:2", "CZE-JAR": "1:1", "MEX-KOR": "1:1", "CZE-MEX": "2:2", "JAR-KOR": "0:2"},
     {"Jméno": "ALEX", "MEX-JAR": "3:1", "CZE-KOR": "2:2", "CZE-JAR": "2:1", "MEX-KOR": "2:0", "CZE-MEX": "1:3", "JAR-KOR": "2:1"},
     {"Jméno": "NASŤA", "MEX-JAR": "3:0", "CZE-KOR": "1:2", "CZE-JAR": "1:0", "MEX-KOR": "1:0", "CZE-MEX": "0:2", "JAR-KOR": "0:2"},
+    {"Jméno": "MATY", "MEX-JAR": "2:0", "CZE-KOR": "1:1", "CZE-JAR": "2:1", "MEX-KOR": "2:0", "CZE-MEX": "1:3", "JAR-KOR": "0:1"},
 ]
 
 AI_TIP = {
@@ -236,8 +237,16 @@ def evaluate(df, results):
     df["Odehráno"] = played_matches
     df["Celkem"] = df[point_cols].sum(axis=1)
 
-    df = df.sort_values(["Celkem", "Jméno"], ascending=[False, True])
-    df.insert(0, "Pořadí", range(1, len(df) + 1))
+    df = df.sort_values(["Celkem", "Jméno"], ascending=[False, True]).reset_index(drop=True)
+
+    # Stejné pořadí při shodě bodů (dense rank: 1,1,3 místo 1,2,3)
+    ranks = []
+    current_rank = 1
+    for i, pts in enumerate(df["Celkem"]):
+        if i > 0 and pts < df["Celkem"].iloc[i - 1]:
+            current_rank = i + 1
+        ranks.append(current_rank)
+    df.insert(0, "Pořadí", ranks)
 
     return df
 
@@ -556,11 +565,45 @@ def generate_ai_insights(evaluated_df, stats_dict, played_matches, results):
 
 
 
+def get_predicted_ranks(df, results):
+    """Spočítá predikované konečné pořadí každého hráče.
+
+    Odehrané zápasy: reálné body. Zbývající zápasy: body za AI tip
+    (tj. každý hráč dostane body, jako by zbytek tipoval stejně jako AI).
+    Vrací dict {jméno: predikované_pořadí} se sdíleným pořadím při shodě.
+    """
+    predicted_totals = {}
+
+    for _, row in df.iterrows():
+        name = row["Jméno"]
+        total = 0
+        for match in MATCH_COLUMNS:
+            real = results.get(match)
+            if parse_score(real) is not None:
+                # Odehraný zápas – skutečné body za hráčův tip
+                total += points_for_tip(row[match], real)
+            else:
+                # Neodehraný zápas – body za AI tip (stejné pro všechny)
+                total += points_for_tip(row[match], AI_TIP.get(match, ""))
+        predicted_totals[name] = total
+
+    # Dense rank (sdílené pořadí při shodě)
+    sorted_pts = sorted(set(predicted_totals.values()), reverse=True)
+    rank_map = {pts: i + 1 for i, pts in enumerate(sorted_pts)}
+    return {name: rank_map[pts] for name, pts in predicted_totals.items()}
+
+
 def render_results_table(df, results):
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     row_classes = {1: "top1", 2: "top2", 3: "top3"}
 
-    header_cells = '<th class="rank-col">Pořadí</th><th class="name-col">Jméno</th>'
+    predicted_ranks = get_predicted_ranks(df, results)
+    all_played = get_played_matches_count(results) == len(MATCH_COLUMNS)
+
+    header_cells = '<th class="rank-col">Pořadí</th>'
+    if not all_played:
+        header_cells += '<th class="rank-col" title="Predikce konečného pořadí dle AI tipu pro zbývající zápasy">Predikce</th>'
+    header_cells += '<th class="name-col">Jméno</th>'
     header_cells += "".join(f"<th>{match}</th>" for match in MATCH_COLUMNS)
     header_cells += '<th>Odehráno</th><th class="total-col">Celkem</th>'
 
@@ -572,6 +615,25 @@ def render_results_table(df, results):
         medal = medals.get(place, "")
 
         cells = f'<td class="rank-cell">{medal} {place}</td>'
+
+        if not all_played:
+            pred_rank = predicted_ranks.get(row["Jméno"], "?")
+            pred_medal = medals.get(pred_rank, "")
+            # Šipka trendu: predikce lepší/horší/stejná jako aktuální pořadí
+            if pred_rank < place:
+                trend = "▲"
+                trend_color = "#4caf50"
+            elif pred_rank > place:
+                trend = "▼"
+                trend_color = "#f44336"
+            else:
+                trend = "●"
+                trend_color = "#888"
+            cells += (
+                f'<td class="rank-cell" style="color:{trend_color};font-size:0.9em">'
+                f'{pred_medal} {pred_rank} <span style="font-size:0.8em">{trend}</span></td>'
+            )
+
         cells += f'<td class="name-cell">{row["Jméno"]}</td>'
 
         for match in MATCH_COLUMNS:
@@ -600,6 +662,8 @@ def render_results_table(df, results):
     ai_points = sum(points_for_tip(AI_TIP[m], results.get(m, "")) for m in MATCH_COLUMNS)
     ai_played = sum(1 for m in MATCH_COLUMNS if parse_score(results.get(m)) is not None)
     ai_cells = '<td class="rank-cell">—</td>'
+    if not all_played:
+        ai_cells += '<td class="rank-cell" style="color:#888;font-size:0.85em">—</td>'
     ai_cells += f'<td class="name-cell">{AI_TIP["Jméno"]}</td>'
     for match in MATCH_COLUMNS:
         tip_value = AI_TIP[match]
@@ -825,6 +889,12 @@ st.markdown("""
 .results-table .total-cell {
     font-weight: 800;
     white-space: nowrap;
+}
+
+.results-table thead th:nth-child(2)[title] {
+    color: #888;
+    font-style: italic;
+    font-size: 0.85em;
 }
 
 .results-table .total-cell {
